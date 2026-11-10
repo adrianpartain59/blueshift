@@ -1,0 +1,74 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>stage: hud</title>
+<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}canvas{display:block;width:100%;height:100%}</style></head>
+<body><canvas id="c"></canvas>
+<script type="module">
+// HUD dev page. Stage parameters (t, start, gear, lead, sector, mode, die ...) plus HUD-only ones:
+//   device=touch|gamepad     frame.device
+//   prompt=roll|breach|flip|hold  [dir=-1|1]   force a tutorial prompt
+//   paused=1                 frame.paused
+//   ftime=5                  pin frame.time
+//   nobest=1 | best=N bestd=M   override the stored bests (NEW BEST / first-run cases)
+//   kick=1.2                 at this many seconds after the first frame, fire 'start' and leave the title
+//   again=16                 at this many seconds, fire a quick 'start' (results -> retry shatter)
+//   leadfn=60,12             lead = 60 + 12 * seconds (crosses 80 m: alarm / relief one-shots)
+//   wipe=1                   fake the vfx white-gold death wipe behind the HUD
+//   bg=1                     fake a bright busy city behind everything (legibility test)
+import { createStage } from './lib/stage.js';
+import { createHud } from '../src/game/hud.js';
+import { hash1, clamp01 } from '../src/engine/math.js';
+import { beatToTime } from '../src/game/timeline.js';
+import { setupCamera } from '../src/game/camera.js';
+
+const stage = createStage();
+const { gfx, q, frame } = stage;
+const hud = createHud(gfx);
+
+const ov = {};
+if (q.has('device')) ov.device = q.get('device');
+if (q.has('prompt')) { ov.prompt = q.get('prompt'); ov.promptDir = +(q.get('dir') || 1); }
+if (q.has('paused')) ov.paused = true;
+if (q.has('ftime')) ov.time = +q.get('ftime');       // freeze frame.time (cosmetic clock) for repeatable title shots
+if (q.has('nobest')) { ov.bestScore = 0; ov.bestDist = 0; }
+if (q.has('best')) ov.bestScore = +q.get('best');
+if (q.has('bestd')) ov.bestDist = +q.get('bestd');
+const kickAt = q.has('kick') ? +q.get('kick') : -1, againAt = q.has('again') ? +q.get('again') : -1;
+let clock = 0, kicked = false, again = false;
+const leadFn = q.has('leadfn') ? q.get('leadfn').split(',').map(Number) : null;
+const T0 = beatToTime(+(q.get('start') || 0));   // kick / again are in stage seconds, like t and seek()
+// The HUD gets a view of the frame with the overrides laid over it (the real frame stays untouched).
+const view = Object.create(frame);
+const F = () => { for (const k in ov) view[k] = ov[k]; return view; };
+
+const VIOLET = [0.25, 0.1, 0.9], WHITE = [1, 1, 1], WIPE = [1, 0.84, 0.5];
+stage.use({
+  onEvent(ev) { hud.onEvent(ev, F()); },
+  update(dt) {
+    clock = frame.t - T0;
+    if (leadFn) { ov.lead = Math.max(0, Math.min(300, leadFn[0] + leadFn[1] * clock)); ov.danger = clamp01(1 - ov.lead / 150); }
+    // The stage only projects the runner when it draws, so during a seek the HUD would see stale
+    // screen coordinates. Project here too (the real game fills these before update).
+    setupCamera(stage.cam, frame, null);
+    if (stage.cam.project(frame.runnerX, frame.runnerY, 0)) { frame.runnerSX = stage.cam.sx; frame.runnerSY = stage.cam.sy; frame.runnerS = stage.cam.s; }
+    if (kickAt >= 0 && !kicked && clock >= kickAt) { kicked = true; ov.mode = 'ignition'; ov.attract = false; hud.onEvent({ type: 'start', quick: false }, F()); }
+    if (againAt >= 0 && !again && clock >= againAt) { again = true; ov.mode = 'run'; ov.attract = false; ov.dead = false; hud.onEvent({ type: 'start', quick: true }, F()); }
+    hud.update(dt, F());
+  },
+  drawBackground() {
+    if (!q.has('bg')) return;
+    // not pretty, just busy and bright: towers of lit windows all around the tube
+    const W = gfx.W, H = gfx.H, t = frame.time;
+    for (let i = 0; i < 520; i++) {
+      const a = hash1(i) * 6.283, r = 190 + hash1(i * 3 + 1) * 900, x = W / 2 + Math.cos(a + t * 0.05) * r, y = H * 0.46 + Math.sin(a + t * 0.05) * r * 0.8;
+      const w = 6 + hash1(i * 7) * 60, h = 3 + hash1(i * 5) * 12;
+      gfx.rect(x, y, w, h, hash1(i * 11) > 0.8 ? WHITE : VIOLET, 0.25 + hash1(i * 13) * 1.3, 0);
+    }
+  },
+  drawScreen() {
+    if (q.has('wipe') && frame.dead) { const a = clamp01(frame.deadT / 0.4); gfx.rect(0, 0, gfx.W, gfx.H, WIPE, 2.4 * a, a); }
+    hud.drawWorld(F());
+  },
+  drawOverlay() { hud.draw(F()); },
+}).start();
+window.__hud = hud;
+</script></body></html>

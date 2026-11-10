@@ -1,0 +1,283 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>sfx probe</title></head>
+<body style="background:#000;color:#8ff;font:12px monospace"><pre id="out">rendering…</pre>
+<script type="module">
+// dev/sfx.html — offline auditions for src/game/sfx.js. Every item renders in its own OfflineAudioContext
+// through the real engine bus graph (master gain + limiter), so numbers are what the player hears.
+//   ?set=all        every one-shot with default options
+//   ?set=variants   option variants: lanes, chords, grades, kinds, chains, gears, sides ...
+//   ?set=rapid      pile-up tests: held rolls, a breach drum fill, fly-by spam, mixed chaos
+//   ?set=loops      grind / wind / haze stepped through levels, then released
+//   &names=a,b      keep only items whose sound name is listed
+// Result: window.__report (per item: peak, rms, length, onset, centroid, L-R balance, bands) and window.__wav
+// (all items back to back, with report.items[i].at = start second in the wav) for a spectrogram.
+import { createAudio } from '../src/engine/audio.js';
+import { createSfx } from '../src/game/sfx.js';
+
+const q = new URLSearchParams(location.search);
+const SR = 44100;
+const T0 = 0.5;
+const setName = q.get('set') || 'all';
+const only = (q.get('names') || '').split(',').filter(Boolean);
+
+function fft(re, im) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) { let t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = (-2 * Math.PI) / len, wr = Math.cos(ang), wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let cr = 1, ci = 0;
+      for (let j = 0; j < len / 2; j++) {
+        const ur = re[i + j], ui = im[i + j];
+        const vr = re[i + j + len / 2] * cr - im[i + j + len / 2] * ci, vi = re[i + j + len / 2] * ci + im[i + j + len / 2] * cr;
+        re[i + j] = ur + vr; im[i + j] = ui + vi; re[i + j + len / 2] = ur - vr; im[i + j + len / 2] = ui - vi;
+        const t = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = t;
+      }
+    }
+  }
+}
+const db = (v) => (v > 1e-9 ? +(20 * Math.log10(v)).toFixed(1) : -180);
+const BANDS = [['sub', 20, 60], ['bass', 60, 250], ['lowmid', 250, 1000], ['mid', 1000, 4000], ['high', 4000, 12000], ['air', 12000, 22050]];
+
+// from/to in samples; `t0` = the sample the sound was asked to start at (for onset timing)
+function analyze(L, R, from, to, t0) {
+  let peak = 0, peakAt = from, clipped = 0, first = -1, last = from;
+  for (let i = from; i < to; i++) {
+    const m = Math.max(Math.abs(L[i]), Math.abs(R[i]));
+    if (m > peak) { peak = m; peakAt = i; }
+    if (m >= 0.995) clipped++;
+    if (m > 0.003) { last = i; }
+  }
+  for (let i = from; i < to; i++) if (Math.max(Math.abs(L[i]), Math.abs(R[i])) > Math.max(0.003, peak * 0.1)) { first = i; break; }
+  let body = from;
+  for (let i = from; i < to; i++) if (Math.max(Math.abs(L[i]), Math.abs(R[i])) > peak * 0.0316) body = i;
+  // "laptop speaker" peak: what is left after a 2-pole highpass at 250 Hz
+  let hp = 0, x1 = 0, y1 = 0, x2 = 0, y2 = 0;
+  const hk = Math.exp((-2 * Math.PI * 250) / SR);
+  for (let i = from; i < to; i++) {
+    const x = (L[i] + R[i]) * 0.5;
+    y1 = hk * (y1 + x - x1); x1 = x;
+    y2 = hk * (y2 + y1 - x2); x2 = y1;
+    if (Math.abs(y2) > hp) hp = Math.abs(y2);
+  }
+  let sum = 0, ll = 0, rr = 0;
+  const end = Math.max(last, from + 1);
+  for (let i = from; i < end; i++) { ll += L[i] * L[i]; rr += R[i] * R[i]; }
+  sum = (ll + rr) * 0.5;
+  const N = 2048, re = new Float32Array(N), im = new Float32Array(N), acc = new Float64Array(BANDS.length);
+  let cn = 0, cd = 0;
+  for (let s = from; s < end; s += N / 2) {
+    for (let i = 0; i < N; i++) { const k = s + i; re[i] = k < to ? (L[k] + R[k]) * 0.5 * (0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (N - 1))) : 0; im[i] = 0; }
+    fft(re, im);
+    for (let k = 1; k < N / 2; k++) {
+      const f = (k * SR) / N, p = re[k] * re[k] + im[k] * im[k];
+      cn += f * p; cd += p;
+      for (let b = 0; b < BANDS.length; b++) if (f >= BANDS[b][1] && f < BANDS[b][2]) acc[b] += p;
+    }
+  }
+  const total = acc.reduce((a, b) => a + b, 0) || 1;
+  const bands = BANDS.map((b, i) => Math.round((acc[i] / total) * 100)).join('/');
+  return {
+    peakDb: db(peak), hpDb: db(hp), rmsDb: db(Math.sqrt(sum / Math.max(1, end - from))), clipped,
+    lenMs: Math.round(((last - t0) / SR) * 1000), bodyMs: Math.round(((body - t0) / SR) * 1000),
+    onsetMs: first < 0 ? -1 : +(((first - t0) / SR) * 1000).toFixed(1),
+    peakAtMs: Math.round(((peakAt - t0) / SR) * 1000),
+    centroidHz: Math.round(cn / (cd || 1)),
+    lrDb: +(db(Math.sqrt(ll)) - db(Math.sqrt(rr))).toFixed(1),
+    bands,
+  };
+}
+
+function wavBase64(L, R) {
+  const n = L.length, buf = new ArrayBuffer(44 + n * 4), v = new DataView(buf);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, 'RIFF'); v.setUint32(4, 36 + n * 4, true); w(8, 'WAVE'); w(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
+  v.setUint16(22, 2, true); v.setUint32(24, SR, true); v.setUint32(28, SR * 4, true); v.setUint16(32, 4, true); v.setUint16(34, 16, true);
+  w(36, 'data'); v.setUint32(40, n * 4, true);
+  for (let i = 0; i < n; i++) {
+    v.setInt16(44 + i * 4, Math.max(-1, Math.min(1, L[i])) * 32767, true);
+    v.setInt16(46 + i * 4, Math.max(-1, Math.min(1, R[i])) * 32767, true);
+  }
+  const bytes = new Uint8Array(buf); let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
+const LEN = { drop: 3.4, death: 4, novaIgnite: 3.2, sectorGate: 2.6, uiStart: 2, launch: 1.8, crash: 1.6 };
+const one = (name, opts, label) => ({ label: label || name, name, len: LEN[name] || 1.3, run: (sfx, t) => sfx.play(name, Object.assign({ when: t }, opts || {})) });
+
+function buildSet(names) {
+  if (setName === 'all') return names.map((n) => one(n));
+  if (setName === 'variants') {
+    const it = [];
+    for (let l = 0; l < 8; l++) it.push(one('roll', { lane: l, dir: l & 1 ? 1 : -1 }, `roll L${l}`));
+    it.push(one('rollRefused', { dir: -1 }, 'rollRefused -1'), one('rollRefused', { dir: 1 }, 'rollRefused +1'));
+    it.push(one('breachHit', { grade: 'good', chord: 0 }, 'bH good wall c0'));
+    for (let c = 0; c < 4; c++) it.push(one('breachHit', { grade: 'perfect', chord: c, chain: c * 2 }, `bH perf wall c${c} ch${c * 2}`));
+    it.push(one('breachHit', { grade: 'perfect', chord: 0, chain: 8 }, 'bH perf wall ch8'));
+    for (const k of ['pylon', 'core', 'gate', 'shutter']) it.push(one('breachHit', { grade: 'perfect', chord: 0, chain: 2, kind: k }, `bH perf ${k}`));
+    it.push(one('breachHit', { grade: 'good', kind: 'pylon', chord: 2 }, 'bH good pylon'), one('breachHit', { grade: 'good', kind: 'gate', chord: 1 }, 'bH good gate'));
+    it.push(one('graze', { side: -1 }, 'graze L'), one('graze', { side: 1 }, 'graze R'), one('thread'));
+    for (const s of [-1, 0, 1]) it.push(one('flyby', { side: s, kind: 'block' }, `flyby ${s} block`));
+    it.push(one('flyby', { side: 1, kind: 'iris' }, 'flyby +1 iris'), one('flyby', { side: -1, kind: 'fin' }, 'flyby -1 fin'));
+    for (const n of [1, 2, 3, 5, 8, 10, 14]) it.push(one('orb', { n }, `orb n${n}`));
+    for (const n of [1, 2, 4, 8, 12, 20]) it.push(one('spark', { n }, `spark n${n}`));
+    for (let g = 2; g <= 5; g++) it.push(one('gearUp', { gear: g }, `gearUp ${g}`));
+    for (let g = 1; g <= 4; g++) it.push(one('gearDown', { gear: g }, `gearDown ${g}`));
+    it.push(one('leadLow', { level: 1 }, 'leadLow 1'), one('leadLow', { level: 2 }, 'leadLow 2'));
+    it.push(one('sector', { chord: 1 }, 'sector c1'), one('sectorGate', { chord: 1 }, 'sectorGate c1'));
+    it.push(one('roll', { lane: 0, pitch: 12, vol: 0.5 }, 'roll +12 vol.5'), one('ram', { pan: -1 }, 'ram pan -1'));
+    // launch fired "now" (no lead time): the whip must squeeze, the thump lands 50 ms late
+    it.push({ label: 'launch now', name: 'launch', len: 1.8, run: (sfx, t, ctx) => { ctx.suspend(t).then(() => { sfx.play('launch'); ctx.resume(); }); } });
+    return it;
+  }
+  if (setName === 'rapid') {
+    const beat = 60 / 128;
+    return [
+      one('roll', { lane: 3, dir: 1 }, 'roll single (ref)'),
+      { label: 'roll x16 @85ms', name: 'roll', len: 2.2, run: (sfx, t) => { for (let i = 0; i < 16; i++) sfx.play('roll', { when: t + i * 0.085, lane: i < 8 ? i : 15 - i, dir: i < 8 ? 1 : -1 }); } },
+      { label: 'roll x8 same lane @85ms', name: 'roll', len: 1.6, run: (sfx, t) => { for (let i = 0; i < 8; i++) sfx.play('roll', { when: t + i * 0.085, lane: 4, dir: 1 }); } },
+      one('breachHit', { grade: 'perfect' }, 'breachHit single (ref)'),
+      { label: 'ram+breach same instant', name: 'breachHit', len: 1.6, run: (sfx, t) => { sfx.play('ram', { when: t }); sfx.play('breachHit', { when: t, grade: 'perfect', chain: 1 }); } },
+      { label: 'drum fill 4 walls + gate', name: 'breachHit', len: 4.2, run: (sfx, t) => {
+        for (let i = 0; i < 4; i++) { sfx.play('ram', { when: t + i * beat }); sfx.play('breachHit', { when: t + i * beat, grade: 'perfect', chord: 3, chain: i }); }
+        sfx.play('ram', { when: t + 4 * beat }); sfx.play('breachHit', { when: t + 4 * beat, grade: 'perfect', chord: 1, chain: 4, kind: 'gate' }); sfx.play('sectorGate', { when: t + 4 * beat, chord: 1 }); sfx.play('gearUp', { when: t + 4 * beat, gear: 3 }); sfx.play('sector', { when: t + 4 * beat, chord: 1 });
+      } },
+      { label: '8th-note breaches x8', name: 'breachHit', len: 2.6, run: (sfx, t) => { for (let i = 0; i < 8; i++) { sfx.play('ram', { when: t + i * beat / 2 }); sfx.play('breachHit', { when: t + i * beat / 2, grade: i & 1 ? 'good' : 'perfect', chord: 0, chain: i }); } } },
+      { label: 'flyby x40 @30ms', name: 'flyby', len: 2.2, run: (sfx, t) => { for (let i = 0; i < 40; i++) sfx.play('flyby', { when: t + i * 0.031, side: (i % 3) - 1, kind: i % 5 ? 'block' : 'iris' }); } },
+      { label: 'flyby x12 same instant', name: 'flyby', len: 1.3, run: (sfx, t) => { for (let i = 0; i < 12; i++) sfx.play('flyby', { when: t, side: (i % 3) - 1 }); } },
+      { label: 'spark x20 @58ms', name: 'spark', len: 2, run: (sfx, t) => { for (let i = 0; i < 20; i++) sfx.play('spark', { when: t + i * 0.0586, n: i + 1 }); } },
+      { label: 'graze x10 @60ms', name: 'graze', len: 1.6, run: (sfx, t) => { for (let i = 0; i < 10; i++) sfx.play('graze', { when: t + i * 0.06, side: i & 1 ? 1 : -1 }); } },
+      { label: 'orb x6 @117ms', name: 'orb', len: 2, run: (sfx, t) => { for (let i = 0; i < 6; i++) sfx.play('orb', { when: t + i * 0.117, n: i + 1 }); } },
+      { label: 'THE DROP stack', name: 'drop', len: 3.6, run: (sfx, t) => { sfx.play('ram', { when: t }); sfx.play('breachHit', { when: t, kind: 'shutter', grade: 'perfect' }); sfx.play('drop', { when: t }); sfx.play('novaIgnite', { when: t }); sfx.play('gearUp', { when: t, gear: 2 }); } },
+      { label: 'opening beats 0-24', name: 'opening', len: 14, run: (sfx, t, ctx) => {
+        const B = (b) => t + b * beat;
+        const at = (b, fn) => ctx.suspend(B(b)).then(() => { fn(); ctx.resume(); });
+        sfx.play('uiStart', { when: B(0) });
+        at(0.1, () => sfx.loop('wind', 0.15));
+        for (let i = 0; i < 3; i++) sfx.play('roll', { when: B(1.5 + i * 0.5), lane: i + 1, dir: 1 });
+        sfx.play('launch', { when: B(4) }); sfx.play('ram', { when: B(4) }); sfx.play('breachHit', { when: B(4), kind: 'shutter', grade: 'good', chord: 1 });
+        at(4, () => sfx.loop('wind', 0.3));
+        sfx.play('roll', { when: B(7.5), lane: 4, dir: 1 }); sfx.play('flyby', { when: B(8), side: -1, kind: 'block' });
+        sfx.play('roll', { when: B(9.6), lane: 3, dir: -1 }); sfx.play('flyby', { when: B(10), side: 1, kind: 'block' });
+        sfx.play('ram', { when: B(12) }); sfx.play('breachHit', { when: B(12), grade: 'perfect', chord: 3, chain: 0 });
+        sfx.play('thread', { when: B(13) }); sfx.play('flyby', { when: B(13), side: 0 });
+        sfx.play('roll', { when: B(15.5), lane: 4, dir: 1 }); sfx.play('flyby', { when: B(16), side: -1 });
+        sfx.play('ram', { when: B(20) }); sfx.play('breachHit', { when: B(20), kind: 'shutter', grade: 'perfect', chord: 1, chain: 1 });
+        sfx.play('drop', { when: B(20) }); sfx.play('novaIgnite', { when: B(20) }); sfx.play('gearUp', { when: B(20), gear: 2 });
+        at(20, () => { sfx.loop('wind', 0.45); sfx.loop('haze', 0.25); });
+        sfx.play('rollRefused', { when: B(22), dir: 1 });
+        for (let i = 0; i < 16; i++) at(22 + i * 0.125, () => sfx.loop('grind', 0.3 + i * 0.045, { pan: 0.3 }));
+        at(24, () => { sfx.loop('grind', 0); sfx.play('roll', { lane: 5, dir: 1 }); });
+      } },
+      { label: 'chaos: everything in 2 s', name: 'chaos', len: 3.2, run: (sfx, t) => {
+        const ns = sfx.names.filter((n) => !['drop', 'death', 'novaIgnite', 'sectorGate', 'uiStart', 'launch'].includes(n));
+        for (let i = 0; i < 80; i++) sfx.play(ns[(i * 7) % ns.length], { when: t + i * 0.025, lane: i % 8, side: i & 1 ? 1 : -1, n: i % 9, chord: i & 3, chain: i % 9 });
+      } },
+      { label: 'stopAll after 0.3 s of crash+drop', name: 'stopAll', len: 1.5, run: (sfx, t, ctx) => { sfx.play('crash', { when: t }); sfx.play('drop', { when: t }); sfx.loop('wind', 1); ctx.suspend(t + 0.3).then(() => { sfx.stopAll(); ctx.resume(); }); } },
+    ];
+  }
+  // ?set=seq&seq=roll@0:lane=4,roll@0.085:lane=4;ram@0,breachHit@0:grade=good   (';' separates items)
+  if (setName === 'seq') {
+    return (q.get('seq') || '').split(';').filter(Boolean).map((str) => {
+      const evs = str.split(',').map((e) => {
+        const parts = e.split(':'), [name, at] = parts[0].split('@'), opts = {};
+        for (const kv of parts.slice(1)) { const [k, val] = kv.split('='); opts[k] = isNaN(+val) ? val : +val; }
+        return { name, at: +(at || 0), opts };
+      });
+      const lastAt = Math.max(...evs.map((e) => e.at));
+      return { label: str.slice(0, 27), name: evs[0].name, len: +(q.get('len') || 0) || lastAt + (LEN[evs[0].name] || 1.3), run: (sfx, t) => { for (const e of evs) sfx.play(e.name, Object.assign({ when: t + e.at }, e.opts)); } };
+    });
+  }
+  return [];
+}
+
+async function renderItem(item) {
+  // T0: Chrome's compressor starts fully closed and takes ~0.15 s to open, so nothing may sound before
+  // that or it measures about 3 dB low (found the hard way).
+  const t = T0;
+  const render = async (scale) => {
+    const ctx = new OfflineAudioContext(2, Math.ceil((item.len + T0) * SR), SR);
+    const audio = createAudio({ ctx });
+    audio.sfxBus.gain.value = scale; audio.reverbIn.gain.value = scale;
+    const sfx = createSfx(audio);
+    item.run(sfx, t, ctx);
+    const buf = await ctx.startRendering();
+    return [buf.getChannelData(0), buf.getChannelData(1)];
+  };
+  const [L, R] = await render(1);
+  const r = analyze(L, R, 0, L.length, Math.round(t * SR));
+  // the same sound 30 dB down stays under the limiter: its peak + 30 is the level the limiter was fed
+  const [l2, r2] = await render(0.0316);
+  let pk = 0;
+  for (let i = 0; i < l2.length; i++) { const m = Math.max(Math.abs(l2[i]), Math.abs(r2[i])); if (m > pk) pk = m; }
+  r.rawDb = +(db(pk) + 30).toFixed(1);
+  return { L, R, r };
+}
+
+// loops: one context per loop, level stepped every 2 s via suspend/resume, then released
+async function renderLoop(name) {
+  const steps = [0.1, 0.25, 0.5, 0.75, 1, 0], seg = 2;
+  const ctx = new OfflineAudioContext(2, Math.ceil(steps.length * seg * SR), SR);
+  const audio = createAudio({ ctx });
+  const sfx = createSfx(audio);
+  sfx.loop(name, steps[0]);
+  // the game calls loop() every frame: hammer it to prove repeated calls are harmless
+  for (let i = 1; i < steps.length * seg * 30; i++) {
+    const at = i / 30, lv = steps[Math.min(steps.length - 1, Math.floor(at / seg))];
+    ctx.suspend(at).then(() => { sfx.loop(name, lv, { pan: 0 }); ctx.resume(); });
+  }
+  const buf = await ctx.startRendering();
+  const L = buf.getChannelData(0), R = buf.getChannelData(1);
+  const segs = steps.map((lv, i) => {
+    const a = Math.round((i * seg + 0.8) * SR), b = Math.round((i + 1) * seg * SR);
+    const r = analyze(L, R, a, b, a);
+    return { level: lv, peakDb: r.peakDb, rmsDb: r.rmsDb, centroidHz: r.centroidHz, lrDb: r.lrDb, bands: r.bands };
+  });
+  // release check: how long after the level-0 call the bed is silent
+  const rel = Math.round((steps.length - 1) * seg * SR);
+  let last = rel;
+  for (let i = rel; i < L.length; i++) if (Math.abs(L[i]) > 0.001 || Math.abs(R[i]) > 0.001) last = i;
+  return { L, R, segs, releaseMs: Math.round(((last - rel) / SR) * 1000) };
+}
+
+async function run() {
+  const report = { set: setName, items: [] };
+  const names = createSfx(createAudio({ ctx: new OfflineAudioContext(2, SR, SR) })).names.slice();
+  report.names = names;
+  const chunks = [];
+  let at = 0;
+  if (setName === 'loops') {
+    for (const name of ['grind', 'wind', 'haze']) {
+      if (only.length && !only.includes(name)) continue;
+      const { L, R, segs, releaseMs } = await renderLoop(name);
+      report.items.push({ label: name, at, releaseMs, segs });
+      chunks.push([L, R]); at += L.length / SR;
+    }
+  } else {
+    const items = buildSet(names).filter((it) => !only.length || only.includes(it.name));
+    for (const item of items) {
+      const { L, R, r } = await renderItem(item);
+      // trim trailing silence (keep 0.25 s) so the spectrogram is not mostly black
+      const a = Math.round((T0 - 0.05) * SR), keep = Math.min(L.length, Math.round((T0 + Math.max(0.2, r.lenMs / 1000) + 0.25) * SR));
+      report.items.push(Object.assign({ label: item.label, at: +at.toFixed(2) }, r));
+      chunks.push([L.subarray(a, keep), R.subarray(a, keep)]); at += (keep - a) / SR;
+    }
+  }
+  const total = chunks.reduce((a, c) => a + c[0].length, 0);
+  const L = new Float32Array(total), R = new Float32Array(total);
+  let o = 0;
+  for (const c of chunks) { L.set(c[0], o); R.set(c[1], o); o += c[0].length; }
+  report.seconds = +(total / SR).toFixed(2);
+  window.__report = report;
+  window.__wav = wavBase64(L, R);
+  document.getElementById('out').textContent = JSON.stringify(report, null, 1);
+  window.__done = true;
+}
+run().catch((e) => { window.__report = { error: String(e && e.stack || e) }; document.getElementById('out').textContent = String(e && e.stack || e); window.__done = true; });
+</script></body></html>

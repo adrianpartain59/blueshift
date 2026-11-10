@@ -1,0 +1,57 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>gfx sandbox</title>
+<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}canvas{display:block;width:100%;height:100%}</style></head>
+<body><canvas id="c"></canvas>
+<script type="module">
+import { createGfx } from '../src/engine/gfx.js';
+import { drawText, measureText } from '../src/engine/font.js';
+import { hex, TAU } from '../src/engine/math.js';
+
+const gfx = createGfx(document.getElementById('c'));
+const CY = hex('#00e5ff'), MG = hex('#ff2bd6'), YL = hex('#ffe14a'), WH = [1, 1, 1], DK = hex('#0a0420'), OR = hex('#ff7a1a'), VI = hex('#7a3cff');
+let t0 = performance.now();
+const q = new URLSearchParams(location.search);
+const post = { time: 0 };
+function frame(now) {
+  const t = q.has('t') ? +q.get('t') : (now - t0) / 1000;
+  gfx.beginFrame();
+  const W = gfx.W, H = gfx.H;
+  // sky gradient
+  gfx.rectGrad(0, 0, W, H, hex('#020108'), 1, 1, hex('#0b0320'), 1, 1);
+  // sun
+  gfx.glow(W * 0.72, H * 0.42, 260, MG, 0.5, 1.5);
+  gfx.disc(W * 0.72, H * 0.42, 110, OR, 1.4, 1);
+  // perspective grid floor
+  const hy = H * 0.62;
+  for (let i = -20; i <= 20; i++) gfx.line(W / 2 + i * 12, hy, W / 2 + i * 240, H + 40, 1.5, MG, 0.9, 5);
+  for (let j = 0; j < 14; j++) { const z = ((j + (t * 0.8) % 1) / 14); const y = hy + (H - hy) * z * z; gfx.line(0, y, W, y, 1.5, MG, 0.4 + z, 5); }
+  // occluder silhouette with neon edge
+  gfx.rect(140, 300, 120, hy - 300, DK, 1, 1);
+  gfx.rectLine(140, 300, 120, hy - 300, 2, CY, 1.2);
+  // primitives row
+  gfx.line(80, 120, 380, 80, 4, CY, 1.5);
+  gfx.line(80, 160, 380, 160, 1, CY, 1.5);
+  gfx.line(80, 190, 380, 190, 8, YL, 1.0, 3);
+  gfx.ring(520, 140, 50, 3, MG, 1.6);
+  gfx.ring(640, 140, 30, 1.5, CY, 1.6);
+  gfx.disc(740, 140, 26, VI, 1.2, 1);
+  gfx.glow(840, 140, 60, YL, 1.5, 2.5);
+  gfx.arc(960, 140, 46, t, t + 4, 3, OR, 1.6);
+  gfx.push(); gfx.translate(1100, 140); gfx.rotate(t); gfx.rect(-30, -30, 60, 60, CY, 0.7, 1); gfx.rectLine(-30, -30, 60, 60, 2, WH, 1.5); gfx.pop();
+  // text
+  drawText(gfx, 'NEON VECTOR FONT 0123456789', W / 2, 250, 30, CY, 1.4, 0.5);
+  drawText(gfx, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', W / 2, 310, 24, MG, 1.4, 0.5);
+  drawText(gfx, '.,:!?-+=/%()[]<>_\'"*# × ↑↓←→ ♦▲▼■●', W / 2, 360, 22, YL, 1.3, 0.5);
+  drawText(gfx, 'SCORE 128,450  ×12  98%', W / 2, 410, 16, WH, 1.2, 0.5, { slant: 0.2 });
+  drawText(gfx, 'tiny text stays readable at 10 units', W / 2, 440, 10, WH, 1.2, 0.5);
+  post.time = t;
+  post.shockwaves = q.has('shock') ? [{ x: 0.5, y: 0.5, radius: 0.25, width: 0.05, strength: 0.03 }] : null;
+  post.radialBlur = q.has('rblur') ? 0.12 : 0;
+  post.glitch = q.has('glitch') ? 0.8 : 0;
+  gfx.endFrame(post);
+  window.__frames = (window.__frames || 0) + 1;
+  window.__stats = { quads: gfx.stats.quads, draws: gfx.stats.draws, hdr: gfx.hdr, W: gfx.W, H: gfx.H };
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script></body></html>

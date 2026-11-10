@@ -1,0 +1,150 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>audio probe</title></head>
+<body style="background:#000;color:#8ff;font:12px monospace"><pre id="out">rendering…</pre>
+<script type="module">
+// Offline audio probe: renders the real music / sfx modules through the real engine bus graph with an
+// OfflineAudioContext and measures the result. Driven by tools/scripts/audio_probe.mjs.
+//   ?mode=music&seconds=24&timeline=0:0.2,8:0.6,16:1      intensity changes at given seconds
+//   ?mode=sfx&names=jump,land,dash                         each sfx 1.5 s apart (names empty = all)
+//   ?mode=mix&seconds=16&intensity=1&names=jump,dash       music + sfx every beat, to check masking
+import { createAudio } from '../src/engine/audio.js';
+// music.js and sfx.js are loaded on demand, so a half-edited sfx.js cannot break a music probe and vice versa.
+let createMusic = null, createSfx = null;
+
+const q = new URLSearchParams(location.search);
+const mode = q.get('mode') || 'music';
+const SR = 44100;
+const SFX_GAP = 1.5;
+const SFX_LEAD = 0.6;   // the bus limiter reads about 3 dB low for the first ~0.15 s of an offline render: start after it settles
+
+function fft(re, im) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) { let t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = (-2 * Math.PI) / len, wr = Math.cos(ang), wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let cr = 1, ci = 0;
+      for (let j = 0; j < len / 2; j++) {
+        const ur = re[i + j], ui = im[i + j];
+        const vr = re[i + j + len / 2] * cr - im[i + j + len / 2] * ci, vi = re[i + j + len / 2] * ci + im[i + j + len / 2] * cr;
+        re[i + j] = ur + vr; im[i + j] = ui + vi; re[i + j + len / 2] = ur - vr; im[i + j + len / 2] = ui - vi;
+        const t = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = t;
+      }
+    }
+  }
+}
+const db = (v) => (v > 1e-9 ? +(20 * Math.log10(v)).toFixed(1) : -180);
+const BANDS = [['sub', 20, 60], ['bass', 60, 250], ['lowmid', 250, 1000], ['mid', 1000, 4000], ['high', 4000, 12000], ['air', 12000, 22050]];
+
+function analyze(L, R, from, to) {
+  let peak = 0, sum = 0, clipped = 0, dc = 0, lr = 0, ll = 0, rr = 0;
+  for (let i = from; i < to; i++) {
+    const l = L[i], r = R[i], m = Math.max(Math.abs(l), Math.abs(r));
+    if (m > peak) peak = m;
+    if (m >= 0.995) clipped++;
+    sum += (l * l + r * r) * 0.5; dc += (l + r) * 0.5; lr += l * r; ll += l * l; rr += r * r;
+  }
+  const n = Math.max(1, to - from);
+  const N = 4096, re = new Float32Array(N), im = new Float32Array(N), acc = new Float64Array(BANDS.length);
+  let centroidNum = 0, centroidDen = 0;
+  for (let s = from; s + N <= to; s += N) {
+    for (let i = 0; i < N; i++) { re[i] = (L[s + i] + R[s + i]) * 0.5 * (0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (N - 1))); im[i] = 0; }
+    fft(re, im);
+    for (let k = 1; k < N / 2; k++) {
+      const f = (k * SR) / N, p = re[k] * re[k] + im[k] * im[k];
+      centroidNum += f * p; centroidDen += p;
+      for (let b = 0; b < BANDS.length; b++) if (f >= BANDS[b][1] && f < BANDS[b][2]) acc[b] += p;
+    }
+  }
+  const total = acc.reduce((a, b) => a + b, 0) || 1;
+  const bands = {};
+  BANDS.forEach((b, i) => { bands[b[0]] = +((acc[i] / total) * 100).toFixed(1); });
+  return {
+    peakDb: db(peak), rmsDb: db(Math.sqrt(sum / n)), crestDb: +(db(peak) - db(Math.sqrt(sum / n))).toFixed(1),
+    clippedSamples: clipped, dcOffset: +(dc / n).toFixed(5),
+    stereoCorr: +(lr / (Math.sqrt(ll * rr) || 1)).toFixed(3),
+    centroidHz: Math.round(centroidNum / (centroidDen || 1)), bandsPct: bands,
+  };
+}
+
+function wavBase64(L, R) {
+  const n = L.length, buf = new ArrayBuffer(44 + n * 4), v = new DataView(buf);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, 'RIFF'); v.setUint32(4, 36 + n * 4, true); w(8, 'WAVE'); w(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
+  v.setUint16(22, 2, true); v.setUint32(24, SR, true); v.setUint32(28, SR * 4, true); v.setUint16(32, 4, true); v.setUint16(34, 16, true);
+  w(36, 'data'); v.setUint32(40, n * 4, true);
+  for (let i = 0; i < n; i++) {
+    v.setInt16(44 + i * 4, Math.max(-1, Math.min(1, L[i])) * 32767, true);
+    v.setInt16(46 + i * 4, Math.max(-1, Math.min(1, R[i])) * 32767, true);
+  }
+  const bytes = new Uint8Array(buf); let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
+async function run() {
+  const report = { mode };
+  if (mode !== 'sfx') ({ createMusic } = await import('../src/game/music.js'));
+  if (mode !== 'music') ({ createSfx } = await import('../src/game/sfx.js'));
+  let seconds = +(q.get('seconds') || 16);
+  let sfxNames = (q.get('names') || '').split(',').filter(Boolean);
+  // an sfx-only render needs the name list first, so build a throwaway context to read it
+  if (mode === 'sfx' && !sfxNames.length) {
+    const tmp = createSfx(createAudio({ ctx: new OfflineAudioContext(2, SR, SR) }));
+    sfxNames = tmp.names.slice();
+  }
+  if (mode === 'sfx') seconds = sfxNames.length * SFX_GAP + SFX_LEAD + 0.4;
+  const ctx = new OfflineAudioContext(2, Math.ceil(seconds * SR), SR);
+  const audio = createAudio({ ctx });
+  if (mode === 'music' || mode === 'mix') {
+    const music = createMusic(audio);
+    const tl = (q.get('timeline') || `0:${q.get('intensity') || 1}`).split(',').map((p) => p.split(':').map(Number));
+    if (q.get('section')) music.setSection(q.get('section'));
+    music.start(0.05);
+    for (let i = 0; i < tl.length; i++) {
+      music.setIntensity(tl[i][1]);
+      music.scheduleUntil(i + 1 < tl.length ? tl[i + 1][0] : seconds);
+    }
+    report.bpm = music.bpm; report.timeline = tl;
+    if (mode === 'mix') {
+      const sfx = createSfx(audio);
+      const beat = 60 / music.bpm; let n = 0;
+      for (let t = 0.05 + beat * 4; t < seconds - 0.5; t += beat * 2) sfx.play(sfxNames[n++ % sfxNames.length], { when: t });
+    }
+  } else {
+    const sfx = createSfx(audio);
+    sfxNames.forEach((name, i) => sfx.play(name, { when: SFX_LEAD + i * SFX_GAP }));
+  }
+  const buf = await ctx.startRendering();
+  const L = buf.getChannelData(0), R = buf.getChannelData(1);
+  report.seconds = seconds;
+  report.overall = analyze(L, R, 0, L.length);
+  if (mode === 'sfx') {
+    report.sfx = {};
+    sfxNames.forEach((name, i) => {
+      const a = Math.floor((SFX_LEAD + i * SFX_GAP) * SR), b = Math.min(L.length, a + Math.floor(SFX_GAP * SR));
+      const r = analyze(L, R, a, b);
+      let last = a;
+      for (let k = a; k < b; k++) if (Math.abs(L[k]) > 0.003 || Math.abs(R[k]) > 0.003) last = k;
+      r.audibleMs = Math.round(((last - a) / SR) * 1000);
+      report.sfx[name] = r;
+    });
+  } else {
+    report.perSecond = [];
+    for (let s = 0; s + 1 <= seconds; s++) {
+      const r = analyze(L, R, s * SR, (s + 1) * SR);
+      report.perSecond.push({ t: s, rmsDb: r.rmsDb, peakDb: r.peakDb, sub: r.bandsPct.sub, bass: r.bandsPct.bass, lowmid: r.bandsPct.lowmid, mid: r.bandsPct.mid, high: r.bandsPct.high });
+    }
+  }
+  window.__report = report;
+  window.__wav = wavBase64(L, R);
+  document.getElementById('out').textContent = JSON.stringify(report, null, 1);
+  window.__done = true;
+}
+run().catch((e) => { window.__report = { error: String(e && e.stack || e) }; document.getElementById('out').textContent = String(e && e.stack || e); window.__done = true; });
+</script></body></html>

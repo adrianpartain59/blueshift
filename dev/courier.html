@@ -1,0 +1,17 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>stage: courier</title>
+<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}canvas{display:block;width:100%;height:100%}</style></head>
+<body><canvas id="c"></canvas>
+<script type="module">
+// The courier on the mock stage. Open with ?norunner=1 to hide the stand-in marker:
+//   node tools/shots.mjs --page "/dev/courier.html?norunner=1" --times 1.0,6.5,10.4,17.9,18.0 --out out/courier/a
+// For a close look at a pose shoot with --dpr 3 and crop around the runner with ffmpeg.
+import { createStage } from './lib/stage.js';
+import { createCourier } from '../src/game/courier.js';
+const stage = createStage();
+const courier = createCourier(stage.gfx, stage.cam);
+stage.use({ onEvent: courier.onEvent, update: courier.update, drawWorld: courier.draw });
+// tools/shots.mjs adds manual=1 and drives time with __stage.seek: do not also run the live loop.
+if (!stage.q.has('manual')) stage.start();
+window.__courier = courier;
+</script></body></html>

@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!--HEAD-START-->
+<title>BLUESHIFT Neon Runner</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+  /* One fixed look: a neon arcade screen. Dark on every host theme by design. */
+  :root { color-scheme: dark; --bg: #020108; --fg: #d8f6ff; --accent: #19e6ff; --hot: #ff2bd6; }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--fg); overflow: hidden; overscroll-behavior: none; }
+  body { font: 14px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace; -webkit-user-select: none; user-select: none;
+    box-sizing: border-box; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+  #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; outline: none; cursor: crosshair; }
+  #fallback { position: fixed; inset: 0; display: grid; place-items: center; text-align: center;
+    padding-block: 24px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+  #fallback p { max-width: 46ch; color: var(--fg); }
+  /* a phone held upright would letterbox the game into a sliver: ask for a turn instead */
+  #rotate { display: none; position: fixed; inset: 0; place-items: center; text-align: center; background: var(--bg); color: var(--accent);
+    letter-spacing: 0.22em; font-size: 15px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+  @media (orientation: portrait) and (pointer: coarse) and (max-width: 600px) { #rotate { display: grid; } }
+  #fallback strong { color: var(--accent); letter-spacing: 0.08em; }
+</style>
+<!--HEAD-END-->
+</head>
+<body>
+<!--BODY-START-->
+<canvas id="game" tabindex="0" aria-label="Game canvas. Press any key to play."></canvas>
+<div id="rotate" aria-hidden="true">ROTATE YOUR PHONE<br>TO RUN</div>
+<div id="fallback" hidden><p><strong>WEBGL2 NEEDED</strong><br>This game draws everything with its own WebGL2 engine, and this browser did not provide a WebGL2 context. Try a current Chrome, Edge, Firefox or Safari with hardware acceleration on.</p></div>
+<script type="module" src="./src/main.js"></script>
+<!--BODY-END-->
+</body>
+</html>

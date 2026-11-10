@@ -1,0 +1,131 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>look spike</title>
+<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}canvas{display:block;width:100%;height:100%}</style></head>
+<body><canvas id="c"></canvas>
+<script type="module">
+// Throwaway look test: into-the-screen tunnel (mode=3d) vs side-view parallax (mode=2d).
+import { createGfx } from '../src/engine/gfx.js';
+import { drawText } from '../src/engine/font.js';
+import { hex, TAU, hash1, hash2, lerp, clamp01 } from '../src/engine/math.js';
+
+const gfx = createGfx(document.getElementById('c'));
+const q = new URLSearchParams(location.search);
+const mode = q.get('mode') || '3d';
+const CY = hex('#19e6ff'), MG = hex('#ff2bd6'), YL = hex('#ffd84a'), WH = [1, 1, 1], OR = hex('#ff7a1a'), VI = hex('#7a3cff'), BL = hex('#2a5bff'), RD = hex('#ff2a4a'), DK = hex('#04020c'), DK2 = hex('#0a0618');
+const post = { time: 0, radialBlur: 0 };
+
+function draw3d(t) {
+  const W = gfx.W, H = gfx.H, cx = W / 2, cy = H * 0.46, F = 520;
+  gfx.rectGrad(0, 0, W, H, hex('#010106'), 1, 1, hex('#06021a'), 1, 1);
+  // stars
+  for (let i = 0; i < 160; i++) gfx.glow(hash1(i) * W, hash1(i + 999) * H, 1.5 + hash1(i + 5) * 2, WH, 0.25 + hash1(i + 77) * 0.7, 2);
+  // planet
+  gfx.glow(cx + 260, cy - 60, 420, BL, 0.22, 1.2);
+  gfx.disc(cx + 260, cy - 40, 150, hex('#0b1030'), 1, 1);
+  gfx.arc(cx + 260, cy - 40, 150, Math.PI * 0.9, Math.PI * 1.9, 3, CY, 1.4, 6);
+  const N = 8, R = 260, speed = 900, z0 = (t * speed) % 240;
+  const P = (ang, r, z, out) => { const x = Math.cos(ang) * r, y = Math.sin(ang) * r; out[0] = cx + (x / z) * F; out[1] = cy + (y / z) * F; };
+  const a = [0, 0], b = [0, 0], c = [0, 0], d = [0, 0];
+  const rot = Math.sin(t * 0.7) * 0.12 + TAU / 16;
+  // tiles (far to near)
+  for (let k = 26; k >= 0; k--) {
+    const zA = 240 * k - z0 + 120, zB = zA + 240;
+    if (zB < 60) continue;
+    const za = Math.max(zA, 60);
+    const fog = clamp01(1 - za / 6200);
+    const row = Math.floor((t * speed) / 240) + k;
+    for (let s = 0; s < N; s++) {
+      const a0 = rot + (s / N) * TAU, a1 = rot + ((s + 1) / N) * TAU;
+      const h = hash2(row, s);
+      const solid = h > 0.42 || s === 2;
+      P(a0, R, za, a); P(a1, R, za, b); P(a1, R, zB, c); P(a0, R, zB, d);
+      if (solid) {
+        const hazard = h > 0.93;
+        const col = hazard ? RD : (s % 2 ? CY : MG);
+        gfx.quad(a[0], a[1], b[0], b[1], c[0], c[1], d[0], d[1], hazard ? hex('#30040c') : DK2, 1, 1);
+        gfx.quad(a[0], a[1], b[0], b[1], c[0], c[1], d[0], d[1], col, 0.05 * fog + (hazard ? 0.12 : 0), 0);
+        const lw = Math.max(0.8, 900 / za);
+        gfx.line(a[0], a[1], b[0], b[1], lw, col, 1.3 * fog, 4);
+        gfx.line(a[0], a[1], d[0], d[1], lw, col, 0.9 * fog, 4);
+        gfx.line(b[0], b[1], c[0], c[1], lw, col, 0.9 * fog, 4);
+      }
+    }
+  }
+  // speed streaks
+  for (let i = 0; i < 40; i++) {
+    const ang = hash1(i + 300) * TAU, rr = R * (1.25 + hash1(i) * 1.2), z = 2400 - ((t * 2600 + hash1(i + 50) * 2400) % 2300);
+    P(ang, rr, z, a); P(ang, rr, z + 260, b);
+    gfx.line(a[0], a[1], b[0], b[1], 1.5, WH, 0.5, 4);
+  }
+  // runner (on the bottom face)
+  const px = cx, py = cy + (R / 330) * F - 6;
+  gfx.glow(px, py - 40, 110, CY, 0.5, 2);
+  gfx.line(px, py - 70, px, py - 30, 9, CY, 2.2);            // torso
+  gfx.disc(px, py - 84, 11, WH, 1.6, 1);
+  gfx.line(px, py - 30, px - 16, py, 6, CY, 2); gfx.line(px, py - 30, px + 14, py - 6, 6, CY, 2);
+  gfx.line(px, py - 60, px - 22, py - 44, 5, CY, 2); gfx.line(px, py - 60, px + 20, py - 50, 5, CY, 2);
+  post.radialBlur = 0.035;
+}
+
+function draw2d(t) {
+  const W = gfx.W, H = gfx.H;
+  gfx.rectGrad(0, 0, W, H, hex('#010108'), 1, 1, hex('#0c0424'), 1, 1);
+  for (let i = 0; i < 200; i++) gfx.glow(hash1(i) * W, hash1(i + 999) * H * 0.8, 1.2 + hash1(i + 5) * 2, WH, 0.2 + hash1(i + 77) * 0.6, 2);
+  // planet
+  gfx.glow(W * 0.74, H * 0.95, 620, VI, 0.25, 1.3);
+  gfx.disc(W * 0.74, H * 1.25, 520, hex('#0a0828'), 1, 1);
+  gfx.arc(W * 0.74, H * 1.25, 520, Math.PI * 1.05, Math.PI * 1.95, 3, MG, 1.3, 8);
+  // far megastructures
+  const scroll = t * 520;
+  for (let layer = 0; layer < 3; layer++) {
+    const par = [0.12, 0.3, 0.6][layer], bw = [150, 110, 90][layer], baseY = [560, 600, 640][layer];
+    const col = [VI, MG, CY][layer], kk = [0.25, 0.4, 0.7][layer];
+    const off = (scroll * par) % bw, first = Math.floor((scroll * par) / bw);
+    for (let i = -1; i < W / bw + 2; i++) {
+      const id = first + i, h = 120 + hash2(id, layer) * [330, 260, 170][layer], x = i * bw - off;
+      const w = bw * (0.55 + hash2(id, layer + 9) * 0.4);
+      gfx.rect(x, baseY - h, w, h + 200, [DK, DK, DK2][layer], 1, 1);
+      gfx.line(x, baseY - h, x + w, baseY - h, 1.5, col, kk, 5);
+      gfx.line(x, baseY - h, x, baseY, 1, col, kk * 0.5, 4);
+      for (let wy = 0; wy < h / 22 - 1; wy++) for (let wx = 0; wx < w / 16 - 1; wx++) {
+        if (hash2(id * 31 + wx, wy * 17 + layer) > 0.72) gfx.rect(x + 6 + wx * 16, baseY - h + 10 + wy * 22, 7, 10, hash2(id + wx, wy) > 0.5 ? YL : col, kk * 0.9, 0);
+      }
+    }
+  }
+  // track
+  const gy = 560;
+  gfx.rect(0, gy, W, 30, DK, 1, 1);
+  gfx.line(0, gy, W, gy, 3, CY, 1.6, 5);
+  gfx.rect(0, 150, W, 22, DK, 1, 1);
+  gfx.line(0, 172, W, 172, 3, MG, 1.6, 5);
+  for (let i = 0; i < 30; i++) { const x = ((i * 90 - scroll) % (30 * 90) + 30 * 90) % (30 * 90) - 60; gfx.line(x, gy + 6, x - 14, gy + 26, 2, CY, 0.6); gfx.line(x, 166, x - 14, 152, 2, MG, 0.6); }
+  // hazards
+  gfx.rect(820, gy - 90, 26, 90, hex('#2a0410'), 1, 1); gfx.rectLine(820, gy - 90, 26, 90, 2.5, RD, 2);
+  gfx.line(1050, 172, 1050, gy, 5, YL, 1.6, 6);
+  // runner
+  const px = 330, py = gy;
+  for (let i = 1; i < 14; i++) gfx.line(px - i * 22, py - 46 + Math.sin(t * 9 + i * 0.6) * 5, px - (i + 1) * 22, py - 46 + Math.sin(t * 9 + (i + 1) * 0.6) * 5, 7 * (1 - i / 14), MG, 1.3 * (1 - i / 14), 4);
+  gfx.glow(px, py - 40, 100, CY, 0.45, 2);
+  gfx.line(px - 4, py - 62, px + 4, py - 30, 9, CY, 2.2);
+  gfx.disc(px + 4, py - 76, 10, WH, 1.6, 1);
+  gfx.line(px + 4, py - 30, px + 26, py - 8, 6, CY, 2); gfx.line(px + 26, py - 8, px + 16, py, 5, CY, 2);
+  gfx.line(px + 4, py - 30, px - 18, py - 14, 6, CY, 2); gfx.line(px - 18, py - 14, px - 34, py - 22, 5, CY, 2);
+  gfx.line(px, py - 56, px + 20, py - 44, 5, CY, 2); gfx.line(px, py - 56, px - 20, py - 50, 5, CY, 2);
+  post.radialBlur = 0;
+}
+
+function frame(now) {
+  const t = q.has('t') ? +q.get('t') : now / 1000;
+  gfx.beginFrame();
+  (mode === '3d' ? draw3d : draw2d)(t);
+  post.time = t;
+  gfx.beginOverlay(post);
+  drawText(gfx, '128,450', 40, 44, 26, WH, 1.3, 0);
+  drawText(gfx, '×12', 40, 84, 20, YL, 1.5, 0);
+  drawText(gfx, 'OVERLAY TEXT STAYS CRISP', gfx.W / 2, 44, 18, CY, 1.2, 0.5);
+  gfx.endFrame(post);
+  window.__frames = (window.__frames || 0) + 1;
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script></body></html>

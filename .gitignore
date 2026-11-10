@@ -1,0 +1,9 @@
+# generated: node tools/build.mjs writes the single-file game here (the Pages workflow builds it)
+dist/
+# screenshots, audio captures, videos and review scratch written by the tools
+out/
+# working notes of the build sessions
+task_plan.md
+findings.md
+progress.md
+.DS_Store

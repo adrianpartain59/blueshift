@@ -1,0 +1,50 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>stage: city</title>
+<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}canvas{display:block;width:100%;height:100%}</style></head>
+<body><canvas id="c"></canvas>
+<script type="module">
+// The city on the mock stage. Extra URL parameters (on top of dev/lib/stage.js):
+//   haz=1   draw stand-in hazards (a magenta slab, a yellow ICE wall, a fin) to judge readability
+import { createStage } from './lib/stage.js';
+import { createCity } from '../src/game/city.js';
+import { C, LANE_ANGLE, APOTHEM, VERTEX_R } from '../src/game/config.js';
+
+const stage = createStage();
+const { gfx, cam, q } = stage;
+const city = createCity(gfx, cam);
+const haz = q.has('haz');
+
+// corner i of the octagon is the boundary between lane i-1 and lane i
+const vx = (i) => Math.sin((i - 0.5) * LANE_ANGLE) * VERTEX_R, vy = (i) => -Math.cos((i - 0.5) * LANE_ANGLE) * VERTEX_R;
+function slab(lane, z, len) {
+  const x0 = vx(lane), y0 = vy(lane), x1 = vx(lane + 1), y1 = vy(lane + 1);
+  const ix0 = x0 * 0.62, iy0 = y0 * 0.62, ix1 = x1 * 0.62, iy1 = y1 * 0.62;
+  cam.quad(x0, y0, z, x1, y1, z, ix1, iy1, z, ix0, iy0, z, C.solidFill, 1, 1);
+  cam.quad(ix0, iy0, z, ix1, iy1, z, ix1, iy1, z + len, ix0, iy0, z + len, C.solidFill, 1, 1);
+  cam.line(x0, y0, z, x1, y1, z, 0.16, C.solid, 2); cam.line(x1, y1, z, ix1, iy1, z, 0.16, C.solid, 2);
+  cam.line(ix1, iy1, z, ix0, iy0, z, 0.16, C.solid, 2); cam.line(ix0, iy0, z, x0, y0, z, 0.16, C.solid, 2);
+  cam.line(ix0, iy0, z, ix0, iy0, z + len, 0.1, C.solid, 1.4); cam.line(ix1, iy1, z, ix1, iy1, z + len, 0.1, C.solid, 1.4);
+}
+function iceWall(z) {
+  for (let i = 0; i < 8; i++) {
+    cam.line(vx(i), vy(i), z, vx(i + 1), vy(i + 1), z, 0.14, C.ice, 2);
+    cam.line(vx(i) * 0.5, vy(i) * 0.5, z, vx(i + 1) * 0.5, vy(i + 1) * 0.5, z, 0.08, C.ice, 1.5);
+    cam.line(vx(i), vy(i), z, vx(i) * 0.5, vy(i) * 0.5, z, 0.08, C.ice, 1.5);
+    cam.line(vx(i) * 0.5, vy(i) * 0.5, z, 0, 0, z, 0.06, C.ice, 1.2);
+  }
+}
+function drawHazards(frame) {
+  // far to near, at fixed depths so every screenshot shows a hazard at each range
+  const L = Math.round(frame.roll / LANE_ANGLE);        // the lane at the bottom of the screen right now
+  const at = (k) => (((L + k) % 8) + 8) % 8;
+  slab(at(3), 150, 4); iceWall(128); slab(at(6), 104, 4);
+  slab(at(1), 72, 4); iceWall(48); slab(at(7), 26, 4); slab(at(2), 10, 4); slab(at(5), 3, 4);
+}
+
+stage.use({
+  onEvent: city.onEvent,
+  update: city.update,
+  drawBackground: city.draw,
+  drawBack: haz ? drawHazards : null,
+}).start();
+</script></body></html>

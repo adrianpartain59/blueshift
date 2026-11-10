@@ -1,0 +1,87 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>stage: vfx</title>
+<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}canvas{display:block;width:100%;height:100%}</style></head>
+<body><canvas id="c"></canvas>
+<script type="module">
+// vfx dev page: the mock game from dev/lib/stage.js + the real vfx module, with the camera kick
+// applied the way the game will apply it, stand-in hazards (so readability can be judged) and an
+// event injector for events the mock script never fires.
+//   inject=whiff@3.2,stumble@4.1,leadLow@12:level=2,rollRefused@6:dir=1,spark@7,gearDown@8
+//   nohaz=1   hide the stand-in hazards      nokick=1  ignore vfx.kick
+import { createStage } from './lib/stage.js';
+import { createVfx } from '../src/game/vfx.js';
+import { setupCamera } from '../src/game/camera.js';
+import { CORNER_X, CORNER_Y } from '../src/game/tube.js';
+import { C, LANES, APOTHEM, LANE_ANGLE } from '../src/game/config.js';
+import { beatToTime } from '../src/game/timeline.js';
+
+const stage = createStage();
+const { gfx, cam, fx, q } = stage;
+const vfx = createVfx(gfx, cam, fx);
+window.__vfx = vfx;
+
+const inject = (q.get('inject') || '').split(',').filter(Boolean).map((s) => {
+  const [head, ...kv] = s.split(':');
+  const [type, at] = head.split('@');
+  const ev = { type };
+  for (const p of kv) { const [k, v] = p.split('='); ev[k] = isNaN(+v) ? v : +v; }
+  return { at: +at, ev, done: false };
+});
+const startT = beatToTime(+(q.get('start') || 0));
+
+// ---- stand-in hazards: yellow ICE walls on the scripted breach beats, magenta slabs around the runner
+const ICE_BEATS = [12, 20, 32, 48, 56, 64, 65, 66, 67, 68, 84, 92, 100, 108];
+const SLABS = [[8, 1], [10, -1], [13, 1], [13, -1], [16, 1], [34, 1], [35, 1], [35, -1], [44, -1], [45, 1], [46, -1], [47, 1], [52, 0], [60, 1], [60, -1], [74, 1], [78, -1], [80, 1], [80, -1]];
+function drawIce(z, k) {
+  for (let i = 0; i < LANES; i++) { const j = (i + 1) % LANES; cam.line(CORNER_X[i], CORNER_Y[i], z, CORNER_X[j], CORNER_Y[j], z, 0.16, C.ice, 1.8 * k, 4); }
+  const R = 1.0, dx = 1.5 * R, dy = Math.sqrt(3) * R;
+  for (let c = -4; c <= 4; c++) for (let r = -4; r <= 4; r++) {
+    const px = c * dx, py = r * dy + (c & 1 ? dy * 0.5 : 0);
+    if (Math.hypot(px, py) > 4.4) continue;
+    for (let e = 0; e < 3; e++) {
+      const a0 = (e * Math.PI) / 3, a1 = ((e + 1) * Math.PI) / 3;
+      cam.line(px + Math.cos(a0) * R, py + Math.sin(a0) * R, z, px + Math.cos(a1) * R, py + Math.sin(a1) * R, z, 0.06, C.ice, 0.9 * k, 3);
+    }
+  }
+}
+function drawSlab(lane, z) {
+  const i = ((lane % LANES) + LANES) % LANES, j = (i + 1) % LANES;
+  const x0 = CORNER_X[i], y0 = CORNER_Y[i], x1 = CORNER_X[j], y1 = CORNER_Y[j];
+  const x2 = x1 * 0.45, y2 = y1 * 0.45, x3 = x0 * 0.45, y3 = y0 * 0.45;
+  cam.quad(x0, y0, z, x1, y1, z, x2, y2, z, x3, y3, z, C.solidFill, 1, 1);
+  cam.line(x0, y0, z, x1, y1, z, 0.14, C.solid, 2, 4); cam.line(x1, y1, z, x2, y2, z, 0.14, C.solid, 2, 4);
+  cam.line(x2, y2, z, x3, y3, z, 0.14, C.solid, 2, 4); cam.line(x3, y3, z, x0, y0, z, 0.14, C.solid, 2, 4);
+}
+function drawHazards(frame) {
+  if (q.has('nohaz')) return;
+  for (let n = ICE_BEATS.length - 1; n >= 0; n--) {
+    const z = (beatToTime(ICE_BEATS[n]) - frame.t) * frame.speed;
+    if (z > 0.5 && z < 150) drawIce(z, z > 60 ? 0.6 : 1);
+  }
+  for (let n = SLABS.length - 1; n >= 0; n--) {
+    const z = (beatToTime(SLABS[n][0]) - frame.t) * frame.speed;
+    if (z > -6 && z < 150) drawSlab(frame.lane + SLABS[n][1], z);
+  }
+}
+
+stage.use({
+  onEvent: vfx.onEvent,
+  update(dt, frame) {
+    for (const it of inject) if (!it.done && frame.t - startT >= it.at) { it.done = true; vfx.onEvent(it.ev, frame); }
+    vfx.update(dt, frame);
+  },
+  drawBackground(frame) {
+    // the stage aims the camera without the kick; the game adds vfx.kick, so do that here
+    if (!q.has('nokick')) {
+      setupCamera(cam, frame, vfx.kick);
+      if (cam.project(frame.runnerX, frame.runnerY, 0)) { frame.runnerSX = cam.sx; frame.runnerSY = cam.sy; frame.runnerS = cam.s; }
+    }
+  },
+  drawBack(frame) { vfx.drawBack(frame); drawHazards(frame); },
+  drawWorld: vfx.drawWorld,
+  drawScreen: vfx.drawScreen,
+});
+// tools/shots.mjs adds manual=1 and drives stage.seek(); the stage would otherwise also run live
+// between seeks and the storyboard times would drift, so only start the clock when nobody is seeking.
+if (!q.has('manual')) stage.start();
+</script></body></html>
